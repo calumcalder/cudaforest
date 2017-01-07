@@ -174,12 +174,12 @@ void __test_file(const char* filename, const char delim) {
  *  @return DataFrame filled from raw data.
  */
 DataFrame* __rawtodataframe(const char*** rawdata, int cols, long rows) {
-        DataFrame* df = malloc(sizeof(DataFrame));
+        DataFrame* df = (DataFrame*) malloc(sizeof(DataFrame));
         df->cols = cols;
         df->rows = rows;
 
         //printf("Allocating memory for DF\n");
-        df->features = (float*) malloc(cols*rows*sizeof(float));
+        df->features = (float*) malloc((cols-1)*rows*sizeof(float));
         df->classes = (int*) malloc(rows*sizeof(int));
 
        // printf("Converting from string data to floats\n");
@@ -300,11 +300,11 @@ struct train_test_split_s train_test_split(const DataFrame* data, float ratio) {
         int rows_train = (int) (ratio*data->rows);
         int rows_test = data->rows - rows_train;
 
-        train->features = malloc(data->cols*rows_train*sizeof(float*));
-        train->classes = malloc(rows_train*sizeof(int));
+        train->features = (float*) malloc(data->cols*rows_train*sizeof(float*));
+        train->classes = (int*) malloc(rows_train*sizeof(int));
 
-        test->features = malloc(data->cols*rows_test*sizeof(float*));
-        test->classes = malloc(rows_test*sizeof(int));
+        test->features = (float*) malloc(data->cols*rows_test*sizeof(float*));
+        test->classes = (int*) malloc(rows_test*sizeof(int));
 
         struct train_test_split_s ret = { train, test };
         return ret;

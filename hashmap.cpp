@@ -4,6 +4,9 @@
 #include "hashmap.h"
 #include "data.h"
 
+#pragma GCC diagnostic ignored "-Wc++11-compat-deprecated-writable-strings"
+#pragma GCC diagnostic ignored "-Wwrite-strings"
+
 #define KEY_LENGTH 20
 
 /**
@@ -101,7 +104,7 @@ char* get_max_hashmap(HashMap* hashmap_p) {
 
 int put_hashmap(HashMap* hashmap_p, const char* key, int val) {
         hash h = strhash((unsigned char*) key) % hashmap_p->size;
-        struct entry entry = hashmap_p->entries[h];
+        HashMapEntry entry = hashmap_p->entries[h];
 
         // Free slot upon entry
         if (strcmp(entry.key, HASHMAP_UNSET_CONST) == 0) {
@@ -142,9 +145,9 @@ int put_hashmap(HashMap* hashmap_p, const char* key, int val) {
 
 HashMap* make_hashmap(size_t size) {
         HashMap* hm = (HashMap*) malloc_debug(sizeof(HashMap), "hm");
-        hm->entries = (struct entry*) malloc_debug(size*sizeof(struct entry), "entries");
+        hm->entries = (HashMapEntry*) malloc_debug(size*sizeof(struct entry), "entries");
         for (int i = 0; i < size; i++) {
-                hm->entries[i].key = malloc_debug(KEY_LENGTH*sizeof(char), "key");
+                hm->entries[i].key = (char*) malloc_debug(KEY_LENGTH*sizeof(char), "key");
                 strcpy(hm->entries[i].key, HASHMAP_UNSET_CONST);
                 hm->entries[i].val = 0;
         }
