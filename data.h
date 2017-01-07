@@ -12,12 +12,12 @@ void* malloc_debug(size_t size, char* val);
 /**
  * Type: DataFrame
  * ---------------
- *  Represents a number of instances of data, with each row i containing a set of features (.features[i]) and a class (.class[i]).
+ *  Represents a number of instances of data, with each row i containing a set of features (.features[i]) and a class (.classes[i]).
  *  Allows the storing of a different data type for features and the class (in this case floats and strings).
  *
  */
 typedef struct dataframe_s {
-        float** features;
+        float* features;
         int* classes;
         int cols;
         int classc;

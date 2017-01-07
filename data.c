@@ -156,7 +156,7 @@ void __test_file(const char* filename, const char delim) {
         for (int i = 0; i < 10 && i < df->rows; i++) {
                 printf("%i: ", i);
                 for (int j = 0; j < fieldc - 1; j++)
-                        printf("%f, ", df->features[i][j]);
+                        printf("%f, ", df->features[i*(df->cols-1) + j]);
                 printf("%i\n", df->classes[i]);
         }
 
@@ -179,10 +179,8 @@ DataFrame* __rawtodataframe(const char*** rawdata, int cols, long rows) {
         df->rows = rows;
 
         //printf("Allocating memory for DF\n");
-        df->features = (float**) malloc(rows*sizeof(float*));
+        df->features = (float*) malloc(cols*rows*sizeof(float));
         df->classes = (int*) malloc(rows*sizeof(int));
-        for (int i = 0; i < rows; i++)
-                df->features[i] = malloc((cols - 1)*sizeof(float));
 
        // printf("Converting from string data to floats\n");
 
@@ -190,7 +188,7 @@ DataFrame* __rawtodataframe(const char*** rawdata, int cols, long rows) {
         HashMap* class_map = make_hashmap(16);
         for (int i = 0; i < rows; i++) {
                 for (int j = 0; j < cols - 1; j++)
-                        df->features[i][j] = atof(rawdata[i][j]);
+                        df->features[i*(df->cols-1) + j] = atof(rawdata[i][j]);
                 if (get_hashmap(class_map, rawdata[i][cols - 1]) == -1) {
                         put_hashmap(class_map, rawdata[i][cols - 1], class_idx);
                         class_idx++;
@@ -285,7 +283,7 @@ float** feature_min_max(const DataFrame* data) {
 
         for (int i = 0; i < data->rows; i++)
         for (int j = 0; j < features; j++) {
-                float fval = data->features[i][j];
+                float fval = data->features[i*(data->cols-1) + j];
                 if (ret[j][0] > fval)
                         ret[j][0] = fval;
                 if (ret[j][1] < fval)
@@ -302,17 +300,11 @@ struct train_test_split_s train_test_split(const DataFrame* data, float ratio) {
         int rows_train = (int) (ratio*data->rows);
         int rows_test = data->rows - rows_train;
 
-        train->features = malloc(rows_train*sizeof(float*));
+        train->features = malloc(data->cols*rows_train*sizeof(float*));
         train->classes = malloc(rows_train*sizeof(int));
-        for (int i = 0; i < rows_train; i++) {
-                test->features[i] = malloc((data->cols - 1)*sizeof(float));
-        }
 
-        test->features = malloc(rows_test*sizeof(float*));
+        test->features = malloc(data->cols*rows_test*sizeof(float*));
         test->classes = malloc(rows_test*sizeof(int));
-        for (int i = 0; i < rows_test; i++) {
-                test->features[i] = malloc((data->cols - 1)*sizeof(float));
-        }
 
         struct train_test_split_s ret = { train, test };
         return ret;
