@@ -18,9 +18,9 @@ void* malloc_debug(size_t size, char* val);
  */
 typedef struct dataframe_s {
         float** features;
-        int* class;
+        int* classes;
         int cols;
-        int classes;
+        int classc;
         long rows;
 } DataFrame;
 

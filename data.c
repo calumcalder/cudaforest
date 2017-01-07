@@ -157,7 +157,7 @@ void __test_file(const char* filename, const char delim) {
                 printf("%i: ", i);
                 for (int j = 0; j < fieldc - 1; j++)
                         printf("%f, ", df->features[i][j]);
-                printf("%i\n", df->class[i]);
+                printf("%i\n", df->classes[i]);
         }
 
                 
@@ -180,7 +180,7 @@ DataFrame* __rawtodataframe(const char*** rawdata, int cols, long rows) {
 
         //printf("Allocating memory for DF\n");
         df->features = (float**) malloc(rows*sizeof(float*));
-        df->class = (int*) malloc(rows*sizeof(int));
+        df->classes = (int*) malloc(rows*sizeof(int));
         for (int i = 0; i < rows; i++)
                 df->features[i] = malloc((cols - 1)*sizeof(float));
 
@@ -195,9 +195,9 @@ DataFrame* __rawtodataframe(const char*** rawdata, int cols, long rows) {
                         put_hashmap(class_map, rawdata[i][cols - 1], class_idx);
                         class_idx++;
                 }
-                df->class[i] = get_hashmap(class_map, rawdata[i][cols-1]);
+                df->classes[i] = get_hashmap(class_map, rawdata[i][cols-1]);
         }
-        df->classes = class_idx;
+        df->classc = class_idx;
         return df;
 }
 
@@ -303,13 +303,13 @@ struct train_test_split_s train_test_split(const DataFrame* data, float ratio) {
         int rows_test = data->rows - rows_train;
 
         train->features = malloc(rows_train*sizeof(float*));
-        train->class = malloc(rows_train*sizeof(int));
+        train->classes = malloc(rows_train*sizeof(int));
         for (int i = 0; i < rows_train; i++) {
                 test->features[i] = malloc((data->cols - 1)*sizeof(float));
         }
 
         test->features = malloc(rows_test*sizeof(float*));
-        test->class = malloc(rows_test*sizeof(int));
+        test->classes = malloc(rows_test*sizeof(int));
         for (int i = 0; i < rows_test; i++) {
                 test->features[i] = malloc((data->cols - 1)*sizeof(float));
         }
