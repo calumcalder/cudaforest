@@ -1,16 +1,18 @@
 #ifndef HASHMAP_H_
 #define HASHMAP_H_
 #define HASHMAP_UNSET_CONST "__NONE__"
+
+typedef struct entry {
+        char* key;
+        int val;
+} HashMapEntry;
 /**
  * Type: HashMap
  * -------------
  * TODO: HashMap type docs
  */
 typedef struct hashmap_s {
-        struct entry {
-                char* key;
-                int val;
-        }* entries;
+        HashMapEntry* entries;
         size_t size;
 } HashMap;
 
