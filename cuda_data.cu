@@ -50,8 +50,8 @@ int main(int argc, char* argv[]) {
         DataFrame* new_df = dataframe_to_host(device_df);
 
         printf("Orig prt: %p, device ptr: %p, new prt: %p\n", orig_df, device_df, new_df);
-        printf("orig_df: rows %i cols %i classes %i\n", orig_df->rows, orig_df->cols, orig_df->classc);
-        printf("new_df: rows %i cols %i classes %i\n", new_df->rows, new_df->cols, new_df->classc);
+        printf("orig_df: rows %li cols %i classes %i\n", orig_df->rows, orig_df->cols, orig_df->classc);
+        printf("new_df: rows %li cols %i classes %i\n", new_df->rows, new_df->cols, new_df->classc);
         for (int i = 0; i < 10 && i < new_df->rows; i++) {
                 printf("%i: ", i);
                 for (int j = 0; j < new_df->cols - 1; j++)
