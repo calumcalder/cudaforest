@@ -32,10 +32,11 @@ __global__ void __init_rand_states(curandState_t* rand_states) {
  *
  * @param df The DataFrame representing the dataset.
  * @param split_samples The number of sample split values per feature to attempt a split on.
+ * @param rand_states A pointer to blockDim.x*gridDim.x curandStates_ts.
  * @param feature_split The ouput array of FeatureSplit structs to choose the best splits for each tree from.
  *
  */
-__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, FeatureSplit* feature_split, curandState_t* rand_states) {
+__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandState_t* rand_states, FeatureSplit* feature_split) {
         int block_thread_id = threadIdx.x;
         int grid_thread_id = blockIdx.x*blockDim.x + threadIdx.x;
 
@@ -128,7 +129,7 @@ int main(int argc, char* argv[]) {
         cudaMemset((void*) device_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
         printf("Allocated device split memory.\n");
 
-        __gini_scan<<<block_count, thread_count>>>(device_data, 10, device_feature_splits, rand_states);
+        __gini_scan<<<block_count, thread_count>>>(device_data, 10, rand_states, device_feature_splits);
         printf("Completed scan.\n");
 
         FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));

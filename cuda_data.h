@@ -1,5 +1,5 @@
-#ifndef CUDA_DATA_H
-#define CUDA_DATA_H
+#ifndef CUDA_DATA_H_
+#define CUDA_DATA_H_
 #include "data.h"
 
 DataFrame* dataframe_to_device(const DataFrame* df);
