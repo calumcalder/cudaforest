@@ -2,13 +2,8 @@
 #include <stdio.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#include "gini.h"
 #include "data.h"
-
-typedef struct feature_split_s {
-        int feature;
-        float split_val;
-        float score;
-} FeatureSplit;
 
 /**
  * Function __init_rand_states
@@ -19,7 +14,7 @@ typedef struct feature_split_s {
  *                    Should be a device pointer to blockDim.x*gridDim.x curandState_ts.
  */
 __global__ void __init_rand_states(curandState_t* rand_states) {
-        curand_init(0, // Seed
+        curand_init(threadIdx.x, // Seed
                     blockIdx.x*blockDim.x + threadIdx.x, // Unique sequence id
                     0,
                     &(rand_states[blockIdx.x*blockDim.x + threadIdx.x]));
@@ -91,7 +86,7 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
                 }
                 score = 1 - score/2.0;
 
-                if (score < best_score) {
+                if (score <= best_score) {
                         best_score = score;
                         feature_split[grid_thread_id].feature = feature;
                         feature_split[grid_thread_id].split_val = split_value;
@@ -102,6 +97,44 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
         }
         free(counts_l);
         free(counts_r);
+}
+
+FeatureSplit* get_forest_splits_gini(DataFrame* device_data, int classc, int samples_per_feature, int tree_count, int threads_per_tree) {
+        unsigned long long int* device_counts;
+        curandState_t* rand_states;
+        FeatureSplit* device_feature_splits;
+        int block_count = tree_count;
+        int thread_count = threads_per_tree;
+
+        cudaMalloc((void**) &device_counts, classc*sizeof(unsigned long long int));
+        cudaMemset((void*) device_counts, 0, classc*sizeof(unsigned long long int));
+
+        cudaMalloc((void**) &rand_states, block_count*thread_count*sizeof(curandState_t));
+        __init_rand_states<<<block_count, thread_count>>>(rand_states);
+
+        cudaMalloc((void**) &device_feature_splits, block_count*thread_count*sizeof(FeatureSplit));
+        cudaMemset((void*) device_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
+
+        __gini_scan<<<block_count, thread_count>>>(device_data, samples_per_feature, rand_states, device_feature_splits);
+
+        // Consolidate results
+        // TODO: move to device for speedup?
+        FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));
+        cudaError e = cudaMemcpy(feature_splits, device_feature_splits, 
+                        block_count*thread_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
+        printf("%i\n", e);
+
+        FeatureSplit* best_splits = (FeatureSplit*) malloc(block_count*sizeof(FeatureSplit));
+        for (int block = 0; block < block_count; block++) {
+                FeatureSplit best_split = feature_splits[block*thread_count];
+                for (int thread = 1; thread < thread_count; thread++)
+                        if (feature_splits[block*thread_count + thread].score < best_split.score 
+                            && feature_splits[block*thread_count + thread].score >= 0)
+                                best_split = feature_splits[block*thread_count + thread];
+                best_splits[block] = best_split;
+        }
+
+        return best_splits;
 }
 
 #ifdef _TEST_GINI_SCAN_
@@ -148,4 +181,27 @@ int main(int argc, char* argv[]) {
         return 0;
 }
 #endif
+#ifdef _TEST_FOREST_SPLITS_GINI_
+#include "cuda_data.h"
+int main(int argc, char* argv[]) {
+        DataFrame* data = readcsv("data/mnist_test_fix.csv", ',');
+        DataFrame* device_data = dataframe_to_device(data);
+        printf("Read data.\n");
 
+        int samples_per_feature = atoi(argv[1]);
+        int block_count = atoi(argv[2]);
+        int thread_count = atoi(argv[3]);
+
+        FeatureSplit* splits = get_forest_splits_gini(device_data, data->classc, samples_per_feature, block_count, thread_count);
+
+        for (int i = 0; i < block_count; i++) {
+                printf("ID: %i, feature: %i, split value: %f, score %f\n",
+                              i,
+                              splits[i].feature,
+                              splits[i].split_val,
+                              splits[i].score);
+        }
+
+        return 0;
+}
+#endif
