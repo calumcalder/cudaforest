@@ -11,8 +11,23 @@ typedef struct feature_split_s {
 } FeatureSplit;
 
 /**
+ * Function __init_rand_states
+ * ---------------------------
+ * Kernel to initialise random states for curand usage.
+ *
+ * @param rand_states The array of random states to initialise.
+ *                    Should be a device pointer to blockDim.x*gridDim.x curandState_ts.
+ */
+__global__ void __init_rand_states(curandState_t* rand_states) {
+        curand_init(0, // Seed
+                    blockIdx.x*blockDim.x + threadIdx.x, // Unique sequence id
+                    0,
+                    &(rand_states[blockIdx.x*blockDim.x + threadIdx.x]));
+}
+
+/**
  * Function: __gini_scan
- * ------------------------
+ * ---------------------
  * Kernel for basis of Gini scoring for feature and split value selection.
  *
  * @param df The DataFrame representing the dataset.
@@ -20,15 +35,10 @@ typedef struct feature_split_s {
  * @param feature_split The ouput array of FeatureSplit structs to choose the best splits for each tree from.
  *
  */
-__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, FeatureSplit* feature_split) {
+__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, FeatureSplit* feature_split, curandState_t* rand_states) {
         int block_thread_id = threadIdx.x;
         int grid_thread_id = blockIdx.x*blockDim.x + threadIdx.x;
 
-        curandState_t rand_state;
-        curand_init(0, // Seed
-                    blockIdx.x*blockDim.x + threadIdx.x, // Unique sequence id
-                    0,
-                    &rand_state);
         // TODO: potential speedup by mass allocation?
         size_t* counts_l = (size_t*) malloc(df->classc*sizeof(size_t));
         size_t* counts_r = (size_t*) malloc(df->classc*sizeof(size_t));
@@ -58,7 +68,7 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, FeatureSp
                 }
 
                 // Randomly generate split value
-                float split_value = curand_uniform(&rand_state)*(f_max - f_min) + f_min;
+                float split_value = curand_uniform(&(rand_states[grid_thread_id]))*(f_max - f_min) + f_min;
 
                 // Count class distribution for given split
                 for (size_t row = 0; row < df->rows; row++) {
@@ -108,21 +118,23 @@ int main(int argc, char* argv[]) {
         int block_count = atoi(argv[1]);
         int thread_count = atoi(argv[2]);
 
+        curandState_t* rand_states;
+        cudaMalloc((void**) &rand_states, block_count*thread_count*sizeof(curandState_t));
+        __init_rand_states<<<block_count, thread_count>>>(rand_states);
+        cudaThreadSynchronize();
+
         FeatureSplit* device_feature_splits;
         cudaMalloc((void**) &device_feature_splits, block_count*thread_count*sizeof(FeatureSplit));
         cudaMemset((void*) device_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
         printf("Allocated device split memory.\n");
 
-        __gini_scan<<<block_count, thread_count>>>(device_data, 10, device_feature_splits);
-        cudaThreadSynchronize();
+        __gini_scan<<<block_count, thread_count>>>(device_data, 10, device_feature_splits, rand_states);
         printf("Completed scan.\n");
 
         FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));
         cudaError e = cudaMemcpy(feature_splits, device_feature_splits, 
                         block_count*thread_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
         printf("%i\n", e);
-
-        cudaThreadSynchronize();
 
         for (int i = 0; i < block_count*thread_count; i++) {
                 printf("ID: %i, feature: %i, split value: %f, score %f\n",
