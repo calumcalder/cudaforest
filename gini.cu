@@ -1,48 +1,102 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <curand.h>
+#include <curand_kernel.h>
 #include "data.h"
 
-typedef struct class_split_s {
-        int class_id;
+typedef struct feature_split_s {
+        int feature;
         float split_val;
-} ClassSplit;
+        float score;
+} FeatureSplit;
 
 /**
- * Function: __gini_prescan
+ * Function: __gini_scan
  * ------------------------
- * Kernel to calculate the distribution of classes throughout the dataset.
+ * Kernel for basis of Gini scoring for feature and split value selection.
  *
- * @param df The DataFrame object representing the data.
- * @param counts The output class counts, in uncosolidated form with counts per thread.
- *               Should be a block of df->classc*gridsize unsigned long longs.
+ * @param df The DataFrame representing the dataset.
+ * @param split_samples The number of sample split values per feature to attempt a split on.
+ * @param feature_split The ouput array of FeatureSplit structs to choose the best splits for each tree from.
  *
  */
-__global__ void __gini_prescan(DataFrame* df, unsigned long long int* counts) {
-        size_t thread_id = blockIdx.x*blockDim.x + threadIdx.x;
-        size_t grid_size = gridDim.x*blockDim.x; // Assuming 1D grid and 1D blocks
+__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, FeatureSplit* feature_split) {
+        int block_thread_id = threadIdx.x;
+        int grid_thread_id = blockIdx.x*blockDim.x + threadIdx.x;
 
-        size_t row = thread_id;
+        curandState_t rand_state;
+        curand_init(0, // Seed
+                    blockIdx.x*blockDim.x + threadIdx.x, // Unique sequence id
+                    0,
+                    &rand_state);
+        // TODO: potential speedup by mass allocation?
+        size_t* counts_l = (size_t*) malloc(df->classc*sizeof(size_t));
+        size_t* counts_r = (size_t*) malloc(df->classc*sizeof(size_t));
+        float best_score = 1;
+        feature_split[grid_thread_id].feature = -1;
+        feature_split[grid_thread_id].split_val = 0;
+        feature_split[grid_thread_id].score = -1;
 
-        while (row < df->rows) {
-                int class_id = df->classes[row];
-                atomicAdd(&(counts[class_id]), 1);
-                row += grid_size;
+        int thread_run_id = block_thread_id;
+        while (thread_run_id < (df->cols-1)*split_samples) {
+                int feature = thread_run_id/split_samples;
+
+                memset(counts_l, 0, df->classc*sizeof(size_t));
+                memset(counts_r, 0, df->classc*sizeof(size_t));
+                int total_l = 0;
+                int total_r = 0;
+
+                // Get feature min and max values
+                float f_min = df->features[feature];
+                float f_max = df->features[feature];
+                for (size_t row = 1; row < df->rows; row++) {
+                        float row_value = df->features[row*(df->cols-1) + feature];
+                        if (row_value < f_min)
+                                f_min = row_value;
+                        if (row_value > f_max)
+                                f_max = row_value;
+                }
+
+                // Randomly generate split value
+                float split_value = curand_uniform(&rand_state)*(f_max - f_min) + f_min;
+
+                // Count class distribution for given split
+                for (size_t row = 0; row < df->rows; row++) {
+                        float row_value = df->features[row*(df->cols-1) + feature];
+                        if (row_value < split_value) {
+                                counts_l[df->classes[row]] += 1;
+                                total_l += 1;
+                        } else {
+                                counts_r[df->classes[row]] += 1;
+                                total_r += 1;
+                        }
+                }
+
+                // Calculate average gini score
+                float score = 0;
+                for (int i = 0; i < df->classc; i++) {
+                        score += (1.0f*counts_l[i]*counts_l[i])/(total_l*total_l);
+                        score += (1.0f*counts_r[i]*counts_r[i])/(total_r*total_r);
+                }
+                score = 1 - score/2.0;
+
+                if (score < best_score) {
+                        best_score = score;
+                        feature_split[grid_thread_id].feature = feature;
+                        feature_split[grid_thread_id].split_val = split_value;
+                        feature_split[grid_thread_id].score = score;
+                }
+
+                thread_run_id += blockDim.x; 
         }
+        free(counts_l);
+        free(counts_r);
 }
 
-//__global__ void __gini(DataFrame* df, float*) {
-//        int feature = threadIdx.x;
-//}
-
-//ClassSplit select_class_gini(DataFrame* df) {
-//        ClassSplit class_split;
-//        return class_split;
-//}
-
-#ifdef _TEST_GINI_PRESCAN_
+#ifdef _TEST_GINI_SCAN_
 #include "cuda_data.h"
 int main(int argc, char* argv[]) {
-        DataFrame* data = readcsv("data/iris_test.csv", ',');
+        DataFrame* data = readcsv("data/mnist_test_fix.csv", ',');
         DataFrame* device_data = dataframe_to_device(data);
         printf("Read data.\n");
 
@@ -51,19 +105,34 @@ int main(int argc, char* argv[]) {
         cudaMemset((void*) device_counts, 0, data->classc*sizeof(unsigned long long int));
         printf("Allocated device memory.\n");
 
-        int block_count = 2;
-        int thread_count = 16;
-        __gini_prescan<<<block_count, thread_count>>>(device_data, device_counts);
-        printf("Completed prescan.\n");
+        int block_count = atoi(argv[1]);
+        int thread_count = atoi(argv[2]);
 
-        unsigned long long int* counts =
-                (unsigned long long int*) malloc(data->classc*sizeof(unsigned long long int));
-        cudaMemcpy(counts, device_counts,
-                        data->classc*sizeof(unsigned long long int), cudaMemcpyDeviceToHost);
+        FeatureSplit* device_feature_splits;
+        cudaMalloc((void**) &device_feature_splits, block_count*thread_count*sizeof(FeatureSplit));
+        cudaMemset((void*) device_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
+        printf("Allocated device split memory.\n");
 
-        for (int i = 0; i < data->classc; i++)
-                printf("Class %i: %llu\n", i, counts[i]);
+        __gini_scan<<<block_count, thread_count>>>(device_data, 10, device_feature_splits);
+        cudaThreadSynchronize();
+        printf("Completed scan.\n");
+
+        FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));
+        cudaError e = cudaMemcpy(feature_splits, device_feature_splits, 
+                        block_count*thread_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
+        printf("%i\n", e);
+
+        cudaThreadSynchronize();
+
+        for (int i = 0; i < block_count*thread_count; i++) {
+                printf("ID: %i, feature: %i, split value: %f, score %f\n",
+                              i,
+                              feature_splits[i].feature,
+                              feature_splits[i].split_val,
+                              feature_splits[i].score);
+        }
 
         return 0;
 }
 #endif
+
