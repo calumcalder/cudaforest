@@ -99,15 +99,49 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
         free(counts_r);
 }
 
+/**
+ * Function __consolidate_feature_splits 
+ * -------------------------------------
+ * Kernel to consolidate feature splits using a binary tree recursion method.
+ *
+ * @param feature_splits A pointer to the feature splits to consolidate.
+ *        Should be a FeatureSplit[trees*threads_per_tree].
+ * @param consolidate_feature_splits A pointer to the output consolidated splits.
+ *        Shape should be FeatureSplit[tree_count].
+ *
+ */
+__global__ void __consolidate_feature_splits(FeatureSplit* feature_splits, FeatureSplit* consolidated_feature_splits) {
+        int thread_id = threadIdx.x;
+        int tree_id = blockIdx.x;
+        int threads_per_tree = blockDim.x;
+
+        int modulo;
+        for (modulo = 2;
+             1.0*threads_per_tree/modulo > 1.0;
+             modulo = modulo << 1) {
+                if (thread_id % modulo == 0) {
+                        if (feature_splits[tree_id*threads_per_tree + thread_id].score > feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)].score
+                            && feature_splits[tree_id*threads_per_tree + thread_id + (modulo << 1)].score >= 0)
+                                feature_splits[tree_id*threads_per_tree + thread_id] = feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)];
+                }
+                __syncthreads();
+        }
+
+        if (thread_id == 0)
+                consolidated_feature_splits[tree_id] = feature_splits[tree_id*threads_per_tree];
+
+}
+
 FeatureSplit* get_forest_splits_gini(DataFrame* device_data, int classc, int samples_per_feature, int tree_count, int threads_per_tree) {
-        unsigned long long int* device_counts;
+        //unsigned long long int* device_counts;
         curandState_t* rand_states;
         FeatureSplit* device_feature_splits;
+        FeatureSplit* device_consolidated_feature_splits;
         int block_count = tree_count;
         int thread_count = threads_per_tree;
 
-        cudaMalloc((void**) &device_counts, classc*sizeof(unsigned long long int));
-        cudaMemset((void*) device_counts, 0, classc*sizeof(unsigned long long int));
+     // cudaMalloc((void**) &device_counts, classc*sizeof(unsigned long long int));
+     // cudaMemset((void*) device_counts, 0, classc*sizeof(unsigned long long int));
 
         cudaMalloc((void**) &rand_states, block_count*thread_count*sizeof(curandState_t));
         __init_rand_states<<<block_count, thread_count>>>(rand_states);
@@ -117,24 +151,32 @@ FeatureSplit* get_forest_splits_gini(DataFrame* device_data, int classc, int sam
 
         __gini_scan<<<block_count, thread_count>>>(device_data, samples_per_feature, rand_states, device_feature_splits);
 
+        cudaMalloc((void**) &device_consolidated_feature_splits, block_count*sizeof(FeatureSplit));
+        cudaMemset((void*) device_consolidated_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
+        __consolidate_feature_splits<<<block_count, thread_count>>>(device_feature_splits, device_consolidated_feature_splits);
+
+        cudaFree(device_feature_splits);
+        cudaFree(rand_states);
+
         // Consolidate results
         // TODO: move to device for speedup?
-        FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));
-        cudaError e = cudaMemcpy(feature_splits, device_feature_splits, 
-                        block_count*thread_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
-        printf("%i\n", e);
+    //  FeatureSplit* feature_splits = (FeatureSplit*) malloc(block_count*thread_count*sizeof(FeatureSplit));
+    //  cudaError e = cudaMemcpy(feature_splits, device_feature_splits, 
+    //                  block_count*thread_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
+    //  printf("%i\n", e);
 
-        FeatureSplit* best_splits = (FeatureSplit*) malloc(block_count*sizeof(FeatureSplit));
-        for (int block = 0; block < block_count; block++) {
-                FeatureSplit best_split = feature_splits[block*thread_count];
-                for (int thread = 1; thread < thread_count; thread++)
-                        if (feature_splits[block*thread_count + thread].score < best_split.score 
-                            && feature_splits[block*thread_count + thread].score >= 0)
-                                best_split = feature_splits[block*thread_count + thread];
-                best_splits[block] = best_split;
-        }
+    //  FeatureSplit* best_splits = (FeatureSplit*) malloc(block_count*sizeof(FeatureSplit));
+    //  for (int block = 0; block < block_count; block++) {
+    //          FeatureSplit best_split = feature_splits[block*thread_count];
+    //          for (int thread = 1; thread < thread_count; thread++)
+    //                  if (feature_splits[block*thread_count + thread].score < best_split.score 
+    //                      && feature_splits[block*thread_count + thread].score >= 0)
+    //                          best_split = feature_splits[block*thread_count + thread];
+    //          best_splits[block] = best_split;
+    //  }
 
-        return best_splits;
+
+        return device_consolidated_feature_splits;
 }
 
 #ifdef _TEST_GINI_SCAN_
@@ -184,6 +226,10 @@ int main(int argc, char* argv[]) {
 #ifdef _TEST_FOREST_SPLITS_GINI_
 #include "cuda_data.h"
 int main(int argc, char* argv[]) {
+        if (argc != 4) {
+                printf("Usage: ./a.out samples_per_feature tree_count thread_count\n");
+                return 1;
+        }
         DataFrame* data = readcsv("data/mnist_test_fix.csv", ',');
         DataFrame* device_data = dataframe_to_device(data);
         printf("Read data.\n");
@@ -193,13 +239,16 @@ int main(int argc, char* argv[]) {
         int thread_count = atoi(argv[3]);
 
         FeatureSplit* splits = get_forest_splits_gini(device_data, data->classc, samples_per_feature, block_count, thread_count);
+        FeatureSplit* host_splits = (FeatureSplit*) malloc(block_count*sizeof(FeatureSplit));
+        cudaMemcpy(host_splits, splits, block_count*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
 
         for (int i = 0; i < block_count; i++) {
                 printf("ID: %i, feature: %i, split value: %f, score %f\n",
                               i,
-                              splits[i].feature,
-                              splits[i].split_val,
-                              splits[i].score);
+                              host_splits[i].feature,
+                              host_splits[i].split_val,
+                              host_splits[i].score
+                      );
         }
 
         return 0;

@@ -2,6 +2,7 @@
 #define GINI_H_
 #include "data.h"
 
+// TODO: Consider moving to a more general file
 typedef struct feature_split_s {
         int feature;
         float split_val;
