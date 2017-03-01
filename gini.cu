@@ -130,18 +130,17 @@ __global__ void __consolidate_feature_splits_into_forest(FeatureSplit* feature_s
         int modulo;
         for (modulo = 2; 1.0*threads_per_tree/modulo > 1.0; modulo = modulo << 1) {
                 if (thread_id % modulo == 0 && forest->treec*threads_per_tree > tree_id*threads_per_tree + thread_id) {
-                        if ((feature_splits[tree_id*threads_per_tree + thread_id].score > feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)].score
-                          || feature_splits[tree_id*threads_per_tree + thread_id].score < 0)
-                          && feature_splits[tree_id*threads_per_tree + thread_id + (modulo << 1)].score >= 0)
-                               feature_splits[tree_id*threads_per_tree + thread_id] = feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)];
+                        FeatureSplit left_split = feature_splits[tree_id*threads_per_tree + thread_id];
+                        FeatureSplit right_split = feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)];
+                        if ((left_split.score > right_split.score || left_split.score < 0) && right_split.score > 0) {
+                                feature_splits[tree_id*threads_per_tree + thread_id] = right_split;
+                        }
                 }
                 __syncthreads();
         }
 
         if (thread_id == 0) {
-                forest->splits[tree_id*forest->max_nodes + node_tree_id].feature = feature_splits[tree_id*threads_per_tree].feature;
-                forest->splits[tree_id*forest->max_nodes + node_tree_id].split_val = feature_splits[tree_id*threads_per_tree].split_val;
-                forest->splits[tree_id*forest->max_nodes + node_tree_id].score = feature_splits[tree_id*threads_per_tree].score;
+                forest->splits[tree_id*forest->max_nodes + node_tree_id] = feature_splits[tree_id*threads_per_tree];
         }
 
 }
@@ -311,7 +310,7 @@ int main(int argc, char* argv[]) {
         int classc = data->classc;
         // TODO: Work out why it breaks with too low samples_per_feature
         // TODO: Play around with other variables
-        int samples_per_feature = 300;
+        int samples_per_feature = 10;
         int threads_per_tree = 512;
         threads_per_tree = threads_per_tree > samples ? samples : threads_per_tree;
         set_forest_layer_splits_gini(device_data, device_forest, device_cur_node_samples, classc, samples_per_feature, tree_count, threads_per_tree, max_nodes_per_layer);
