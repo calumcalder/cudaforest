@@ -308,9 +308,7 @@ int main(int argc, char* argv[]) {
         cudaMemset(device_cur_node_samples, true, tree_count*max_nodes_per_layer*samples*sizeof(bool));
 
         int classc = data->classc;
-        // TODO: Work out why it breaks with too low samples_per_feature
-        // TODO: Play around with other variables
-        int samples_per_feature = 10;
+        int samples_per_feature = 128;
         int threads_per_tree = 512;
         threads_per_tree = threads_per_tree > samples ? samples : threads_per_tree;
         set_forest_layer_splits_gini(device_data, device_forest, device_cur_node_samples, classc, samples_per_feature, tree_count, threads_per_tree, max_nodes_per_layer);
