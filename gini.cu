@@ -3,7 +3,9 @@
 #include <curand.h>
 #include <curand_kernel.h>
 #include "gini.h"
+#include "forest.h"
 #include "data.h"
+#include "cuda_data.h"
 
 /**
  * Function __init_rand_states
@@ -14,7 +16,7 @@
  *                    Should be a device pointer to blockDim.x*gridDim.x curandState_ts.
  */
 __global__ void __init_rand_states(curandState_t* rand_states) {
-        curand_init(threadIdx.x, // Seed
+        curand_init(clock64() + threadIdx.x, // Seed
                     blockIdx.x*blockDim.x + threadIdx.x, // Unique sequence id
                     0,
                     &(rand_states[blockIdx.x*blockDim.x + threadIdx.x]));
@@ -31,20 +33,25 @@ __global__ void __init_rand_states(curandState_t* rand_states) {
  * @param feature_split The ouput array of FeatureSplit structs to choose the best splits for each tree from.
  *
  */
-__global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandState_t* rand_states, FeatureSplit* feature_split) {
+__global__ void __gini_scan(DataFrame* df, bool* node_samples, int node, int max_nodes_in_level, unsigned int split_samples, curandState_t* rand_states, FeatureSplit* feature_split) {
         int block_thread_id = threadIdx.x;
+        int tree = blockIdx.x;
         int grid_thread_id = blockIdx.x*blockDim.x + threadIdx.x;
+        
+        if (block_thread_id > df->rows*split_samples)
+                return;
 
         // TODO: potential speedup by mass allocation?
         size_t* counts_l = (size_t*) malloc(df->classc*sizeof(size_t));
         size_t* counts_r = (size_t*) malloc(df->classc*sizeof(size_t));
-        float best_score = 1;
+        float best_score = 2.0;
         feature_split[grid_thread_id].feature = -1;
         feature_split[grid_thread_id].split_val = 0;
         feature_split[grid_thread_id].score = -1;
 
-        int thread_run_id = block_thread_id;
-        while (thread_run_id < (df->cols-1)*split_samples) {
+        //int thread_run_id = block_thread_id;
+        //while (thread_run_id < (df->cols-1)*split_samples) {
+        for (int thread_run_id = block_thread_id; thread_run_id < (df->cols - 1)*split_samples; thread_run_id += blockDim.x) {
                 int feature = thread_run_id/split_samples;
 
                 memset(counts_l, 0, df->classc*sizeof(size_t));
@@ -56,11 +63,13 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
                 float f_min = df->features[feature];
                 float f_max = df->features[feature];
                 for (size_t row = 1; row < df->rows; row++) {
-                        float row_value = df->features[row*(df->cols-1) + feature];
-                        if (row_value < f_min)
-                                f_min = row_value;
-                        if (row_value > f_max)
-                                f_max = row_value;
+                        if (node_samples[tree*max_nodes_in_level*df->rows + node*df->rows + row]) {
+                                float row_value = df->features[row*(df->cols-1) + feature];
+                                if (row_value < f_min)
+                                        f_min = row_value;
+                                if (row_value > f_max)
+                                        f_max = row_value;
+                        }
                 }
 
                 // Randomly generate split value
@@ -69,12 +78,14 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
                 // Count class distribution for given split
                 for (size_t row = 0; row < df->rows; row++) {
                         float row_value = df->features[row*(df->cols-1) + feature];
-                        if (row_value < split_value) {
-                                counts_l[df->classes[row]] += 1;
-                                total_l += 1;
-                        } else {
-                                counts_r[df->classes[row]] += 1;
-                                total_r += 1;
+                        if (node_samples[tree*max_nodes_in_level*df->rows + node*df->rows + row]) {
+                                if (row_value < split_value) {
+                                        counts_l[df->classes[row]] += 1;
+                                        total_l += 1;
+                                } else {
+                                        counts_r[df->classes[row]] += 1;
+                                        total_r += 1;
+                                }
                         }
                 }
 
@@ -93,8 +104,9 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
                         feature_split[grid_thread_id].score = score;
                 }
 
-                thread_run_id += blockDim.x; 
+                //thread_run_id += blockDim.x; 
         }
+
         free(counts_l);
         free(counts_r);
 }
@@ -110,28 +122,52 @@ __global__ void __gini_scan(DataFrame* df, unsigned int split_samples, curandSta
  *        Shape should be FeatureSplit[tree_count].
  *
  */
-__global__ void __consolidate_feature_splits(FeatureSplit* feature_splits, FeatureSplit* consolidated_feature_splits) {
+__global__ void __consolidate_feature_splits_into_forest(FeatureSplit* feature_splits, Forest* forest, int node_tree_id) {
         int thread_id = threadIdx.x;
         int tree_id = blockIdx.x;
         int threads_per_tree = blockDim.x;
 
         int modulo;
-        for (modulo = 2;
-             1.0*threads_per_tree/modulo > 1.0;
-             modulo = modulo << 1) {
-                if (thread_id % modulo == 0) {
-                        if (feature_splits[tree_id*threads_per_tree + thread_id].score > feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)].score
-                            && feature_splits[tree_id*threads_per_tree + thread_id + (modulo << 1)].score >= 0)
-                                feature_splits[tree_id*threads_per_tree + thread_id] = feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)];
+        for (modulo = 2; 1.0*threads_per_tree/modulo > 1.0; modulo = modulo << 1) {
+                if (thread_id % modulo == 0 && forest->treec*threads_per_tree > tree_id*threads_per_tree + thread_id) {
+                        if ((feature_splits[tree_id*threads_per_tree + thread_id].score > feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)].score
+                          || feature_splits[tree_id*threads_per_tree + thread_id].score < 0)
+                          && feature_splits[tree_id*threads_per_tree + thread_id + (modulo << 1)].score >= 0)
+                               feature_splits[tree_id*threads_per_tree + thread_id] = feature_splits[tree_id*threads_per_tree + thread_id + (modulo >> 1)];
                 }
                 __syncthreads();
         }
 
-        if (thread_id == 0)
-                consolidated_feature_splits[tree_id] = feature_splits[tree_id*threads_per_tree];
+        if (thread_id == 0) {
+                forest->splits[tree_id*forest->max_nodes + node_tree_id].feature = feature_splits[tree_id*threads_per_tree].feature;
+                forest->splits[tree_id*forest->max_nodes + node_tree_id].split_val = feature_splits[tree_id*threads_per_tree].split_val;
+                forest->splits[tree_id*forest->max_nodes + node_tree_id].score = feature_splits[tree_id*threads_per_tree].score;
+        }
 
 }
 
+void set_forest_layer_splits_gini(DataFrame* device_data, Forest* device_forest, bool* device_node_samples, int classc, int samples_per_feature, int tree_count, int threads_per_tree, int max_nodes_in_layer) {
+        curandState_t* rand_states;
+        FeatureSplit* device_feature_splits;
+        int block_count = tree_count;
+        int thread_count = threads_per_tree;
+
+        cudaMalloc((void**) &rand_states, block_count*thread_count*sizeof(curandState_t));
+        cudaMalloc((void**) &device_feature_splits, block_count*thread_count*sizeof(FeatureSplit));
+
+        __init_rand_states<<<block_count, thread_count>>>(rand_states);
+        for (int node_layer_id = 0; node_layer_id < max_nodes_in_layer; node_layer_id++) {
+                int node_tree_id = node_layer_id + max_nodes_in_layer - 1;
+                cudaMemset((void*) device_feature_splits, 0, block_count*thread_count*sizeof(FeatureSplit));
+
+                __gini_scan<<<block_count, thread_count>>>(device_data, device_node_samples, node_layer_id, max_nodes_in_layer, samples_per_feature, rand_states, device_feature_splits);
+                __consolidate_feature_splits_into_forest<<<block_count, thread_count>>>(device_feature_splits, device_forest, node_tree_id);
+        }
+
+        cudaFree(device_feature_splits);
+        cudaFree(rand_states);
+}
+/*
 FeatureSplit* get_forest_splits_gini(DataFrame* device_data, int classc, int samples_per_feature, int tree_count, int threads_per_tree) {
         //unsigned long long int* device_counts;
         curandState_t* rand_states;
@@ -178,7 +214,7 @@ FeatureSplit* get_forest_splits_gini(DataFrame* device_data, int classc, int sam
 
         return device_consolidated_feature_splits;
 }
-
+*/
 #ifdef _TEST_GINI_SCAN_
 #include "cuda_data.h"
 int main(int argc, char* argv[]) {
@@ -250,6 +286,89 @@ int main(int argc, char* argv[]) {
                               host_splits[i].score
                       );
         }
+
+        return 0;
+}
+#endif
+#ifdef _TEST_SET_FOREST_LAYER_SPLITS_GINI_
+int main(int argc, char* argv[]) {
+        int tree_count = 2;
+        int max_depth = 1;
+
+        Forest* device_forest = __assign_forest_resources(tree_count, max_depth);
+        DataFrame* data = readcsv("data/iris.csv", ',');
+        DataFrame* device_data = dataframe_to_device(data);
+        printf("Read data.\n");
+        int samples = data->rows;
+
+        int max_nodes_per_layer = 1;
+        int max_nodes_per_next_layer = max_nodes_per_layer*2;
+
+        bool* device_cur_node_samples;
+        cudaMalloc(&device_cur_node_samples, tree_count*max_nodes_per_layer*samples*sizeof(bool));
+        cudaMemset(device_cur_node_samples, true, tree_count*max_nodes_per_layer*samples*sizeof(bool));
+
+        int classc = data->classc;
+        // TODO: Work out why it breaks with too low samples_per_feature
+        // TODO: Play around with other variables
+        int samples_per_feature = 300;
+        int threads_per_tree = 512;
+        threads_per_tree = threads_per_tree > samples ? samples : threads_per_tree;
+        set_forest_layer_splits_gini(device_data, device_forest, device_cur_node_samples, classc, samples_per_feature, tree_count, threads_per_tree, max_nodes_per_layer);
+
+        bool* device_next_node_samples;
+        cudaMalloc(&device_next_node_samples, tree_count*max_nodes_per_next_layer*samples*sizeof(bool));
+        cudaMemset(device_next_node_samples, false, tree_count*max_nodes_per_next_layer*samples*sizeof(bool));
+
+        int block_count = tree_count;
+        int threads_per_node = 1024/max_nodes_per_layer;
+        threads_per_node = threads_per_node > 0 ? threads_per_node : 1;
+        dim3 block_dims(max_nodes_per_layer, threads_per_node);
+        __calculate_next_layer_node_samples<<<block_count, block_dims>>>(device_data, device_forest, data->rows, device_cur_node_samples, device_next_node_samples);
+
+        cudaFree(device_cur_node_samples);
+        device_cur_node_samples = device_next_node_samples;
+        max_nodes_per_layer = max_nodes_per_next_layer;
+        max_nodes_per_next_layer = max_nodes_per_layer*2;
+        set_forest_layer_splits_gini(device_data, device_forest, device_cur_node_samples, classc, samples_per_feature, tree_count, threads_per_tree, max_nodes_per_layer);
+
+        Forest* proxy_forest = (Forest*) malloc(sizeof(Forest));
+        cudaMemcpy(proxy_forest, device_forest, sizeof(Forest), cudaMemcpyDeviceToHost);
+
+        FeatureSplit* splits = (FeatureSplit*) malloc(proxy_forest->treec*proxy_forest->max_nodes*sizeof(FeatureSplit));
+        cudaMemcpy(splits, proxy_forest->splits, proxy_forest->treec*proxy_forest->max_nodes*sizeof(FeatureSplit), cudaMemcpyDeviceToHost);
+        printf("%i\n", proxy_forest->treec*proxy_forest->max_nodes);
+
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n",
+                        splits[0].feature,
+                        splits[0].split_val,
+                        splits[0].score
+              );
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n",
+                        splits[1].feature,
+                        splits[1].split_val,
+                        splits[1].score
+              );
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n\n",
+                        splits[2].feature,
+                        splits[2].split_val,
+                        splits[2].score
+              );
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n",
+                        splits[3].feature,
+                        splits[3].split_val,
+                        splits[3].score
+              );
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n",
+                        splits[4].feature,
+                        splits[4].split_val,
+                        splits[4].score
+              );
+        printf("Feature: %i, Split val: %f, Gini Impurity Score: %f\n",
+                        splits[5].feature,
+                        splits[5].split_val,
+                        splits[5].score
+              );
 
         return 0;
 }
