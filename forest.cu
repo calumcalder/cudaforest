@@ -64,13 +64,12 @@ Forest* train_forest(DataFrame* device_data, int trees, int max_depth, int class
 __global__ void __calculate_next_layer_node_samples(DataFrame* data, Forest* forest, int samples, bool* cur_node_samples, bool* node_samples) {
         int tree = blockIdx.x;
         int node = threadIdx.x;
-        int child_node_left = (node << 1) + 1;
         int thread_id = threadIdx.y;
         int threads_per_node = blockDim.y;
         int nodes_in_cur_level = blockDim.x;
         int nodes_in_level = nodes_in_cur_level << 1;
 
-        int child_node_left_id_in_level = child_node_left + 1 - nodes_in_level;
+        int child_node_left_id_in_level = node << 1;
 
         // To keep in memory takes:
         // (2**depth - 1)*rows*trees bytes (as bools)
@@ -81,7 +80,7 @@ __global__ void __calculate_next_layer_node_samples(DataFrame* data, Forest* for
         // Could reduce to node-by-node, but this seems silly.
         for (int i = thread_id; i < samples; i += threads_per_node) {
                 if (cur_node_samples[tree*nodes_in_cur_level*samples + node*samples + i]) {
-                        FeatureSplit feature_split = forest->splits[tree*forest->max_nodes + node];
+                        FeatureSplit feature_split = forest->splits[tree*forest->max_nodes + nodes_in_cur_level + node - 1];
                         bool right = feature_split.split_val < data->features[i*(data->cols - 1) + feature_split.feature];
                         // Child node right is child node left + 1, so add 1 if we want the right branch
                         node_samples[tree*nodes_in_level*samples + (child_node_left_id_in_level + 1)*samples + i] = right;
@@ -107,7 +106,6 @@ bool* __get_device_node_samples(DataFrame* device_data, Forest* device_forest, b
 
         return device_node_samples;
 }
-
 
 #ifdef _TEST_TRAIN_FOREST_
 #include "cuda_data.h"
